@@ -17,7 +17,6 @@ import net.psforever.crypto.CryptoInterface
 import net.psforever.login.psadmin.PsAdminActor
 import net.psforever.login._
 import net.psforever.objects.Default
-import net.psforever.objects.guid.TaskResolver
 import net.psforever.objects.zones._
 import net.psforever.services.account.{AccountIntermediaryService, AccountPersistenceService}
 import net.psforever.services.chat.ChatService
@@ -131,7 +130,6 @@ object Server {
 
     val serviceManager = ServiceManager.boot
     serviceManager ! ServiceManager.Register(classic.Props[AccountIntermediaryService](), "accountIntermediary")
-    serviceManager ! ServiceManager.Register(RandomPool(150).props(classic.Props[TaskResolver]()), "taskResolver")
     serviceManager ! ServiceManager.Register(classic.Props[GalaxyService](), "galaxy")
     serviceManager ! ServiceManager.Register(classic.Props[SquadService](), "squad")
     serviceManager ! ServiceManager.Register(classic.Props[AccountPersistenceService](), "accountPersistence")

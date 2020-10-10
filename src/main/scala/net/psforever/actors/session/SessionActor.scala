@@ -178,7 +178,6 @@ class SessionActor extends Actor with MDCContextAware {
   var accountPersistence: ActorRef                                   = ActorRef.noSender
   var galaxyService: ActorRef                                        = ActorRef.noSender
   var squadService: ActorRef                                         = ActorRef.noSender
-  var taskResolver: ActorRef                                         = Actor.noSender
   var propertyOverrideManager: ActorRef                              = Actor.noSender
   var cluster: typed.ActorRef[InterstellarClusterService.Command]    = Actor.noSender
   var _session: Session                                              = Session()
@@ -401,9 +400,6 @@ class SessionActor extends Actor with MDCContextAware {
     case LookupResult("accountPersistence", endpoint) =>
       accountPersistence = endpoint
       log.info("ID: " + session.id + " Got account persistence service " + endpoint)
-    case LookupResult("taskResolver", endpoint) =>
-      taskResolver = endpoint
-      log.info("ID: " + session.id + " Got task resolver service " + endpoint)
     case LookupResult("galaxy", endpoint) =>
       galaxyService = endpoint
       log.info("ID: " + session.id + " Got galaxy service " + endpoint)
@@ -1096,17 +1092,17 @@ class SessionActor extends Actor with MDCContextAware {
       //TODO sufficiently delete the tool
       sendResponse(ObjectDeleteMessage(tool.GUID, 0))
       continent.AvatarEvents ! AvatarServiceMessage(continent.id, AvatarAction.ObjectDelete(player.GUID, tool.GUID))
-      taskResolver ! GUIDTask.UnregisterEquipment(tool)(continent.GUID)
+      continent.tasks ! GUIDTask.UnregisterEquipment(tool)(continent.GUID)
       val trigger = new BoomerTrigger
       trigger.Companion = obj.GUID
       obj.Trigger = trigger
       val holster = player.Slot(index)
       if (holster.Equipment.contains(tool)) {
         holster.Equipment = None
-        taskResolver ! HoldNewEquipmentUp(player, taskResolver)(trigger, index)
+        continent.tasks ! HoldNewEquipmentUp(player)(trigger, index)
       } else {
         //don't know where boomer trigger should go; drop it on the ground
-        taskResolver ! NewItemDrop(player, continent)(trigger)
+        continent.tasks ! NewItemDrop(player, continent)(trigger)
       }
       StopBundlingPackets()
 
@@ -1146,7 +1142,7 @@ class SessionActor extends Actor with MDCContextAware {
               log.info(s"FinalizeDeployable: setup for telepad #${guid.guid} in zone ${continent.id}")
               obj.Router = routerGUID //necessary; forwards link to the router
               DeployableBuildActivity(obj)
-              RemoveOldEquipmentFromInventory(player, taskResolver)(tool)
+              RemoveOldEquipmentFromInventory(player)(tool)
               StopBundlingPackets()
               //it takes 60s for the telepad to become properly active
               continent.LocalEvents ! LocalServiceMessage.Telepads(RouterTelepadActivation.AddTask(obj, continent))
@@ -1179,11 +1175,11 @@ class SessionActor extends Actor with MDCContextAware {
 
     //!!only dispatch Zone.Deployable.Dismiss from WorldSessionActor as cleanup if the target deployable was never fully introduced
     case Zone.Deployable.DeployableIsDismissed(obj: TurretDeployable) =>
-      taskResolver ! GUIDTask.UnregisterDeployableTurret(obj)(continent.GUID)
+      continent.tasks ! GUIDTask.UnregisterDeployableTurret(obj)(continent.GUID)
 
     //!!only dispatch Zone.Deployable.Dismiss from WorldSessionActor as cleanup if the target deployable was never fully introduced
     case Zone.Deployable.DeployableIsDismissed(obj) =>
-      taskResolver ! GUIDTask.UnregisterObjectTask(obj)(continent.GUID)
+      continent.tasks ! GUIDTask.UnregisterObjectTask(obj)(continent.GUID)
 
     case InterstellarClusterService.ZonesResponse(zones) =>
       zones.foreach { zone =>
@@ -1292,9 +1288,9 @@ class SessionActor extends Actor with MDCContextAware {
       player.avatar = avatar
       interstellarFerry match {
         case Some(vehicle) if vehicle.PassengerInSeat(player).contains(0) =>
-          taskResolver ! RegisterDrivenVehicle(vehicle, player)
+          continent.tasks ! RegisterDrivenVehicle(vehicle, player)
         case _ =>
-          taskResolver ! RegisterNewAvatar(player)
+          continent.tasks ! RegisterNewAvatar(player)
       }
 
     case NewPlayerLoaded(tplayer) =>
@@ -1660,14 +1656,14 @@ class SessionActor extends Actor with MDCContextAware {
       Zoning.Time.Sanctuary
     } else {
       val playerPosition = player.Position.xy
-      (continent.Buildings.values
+      continent.Buildings.values
         .filter { building =>
           val radius = building.Definition.SOIRadius
           Vector3.DistanceSquared(building.Position.xy, playerPosition) < radius * radius
-        }) match {
+        } match {
         case Nil =>
           Zoning.Time.None
-        case List(building) =>
+        case List(building: FactionAffinity) =>
           if (building.Faction == player.Faction) Zoning.Time.Friendly
           else if (building.Faction == PlanetSideEmpire.NEUTRAL) Zoning.Time.Neutral
           else Zoning.Time.Enemy
@@ -1704,7 +1700,7 @@ class SessionActor extends Actor with MDCContextAware {
         case Nil =>
           //no soi interference
           targetBuildings = Nil
-        case List(building) =>
+        case List(building: Building) =>
           //blocked by a single soi; find space just outside of this soi and confirm no new overlap
           val radius = Vector3(0, building.Definition.SOIRadius.toFloat + 5f, 0)
           whereToDroppod =
@@ -2121,10 +2117,10 @@ class SessionActor extends Actor with MDCContextAware {
             case (_, guid) => sendResponse(ObjectDeleteMessage(guid, 0))
           }
           //functionally delete
-          delete.foreach { case (obj, _) => taskResolver ! GUIDTask.UnregisterEquipment(obj)(continent.GUID) }
+          delete.foreach { case (obj, _) => continent.tasks ! GUIDTask.UnregisterEquipment(obj)(continent.GUID) }
           //redraw
           if (maxhand) {
-            taskResolver ! HoldNewEquipmentUp(player, taskResolver)(
+            continent.tasks ! HoldNewEquipmentUp(player)(
               Tool(GlobalDefinitions.MAXArms(subtype, player.Faction)),
               0
             )
@@ -2201,11 +2197,11 @@ class SessionActor extends Actor with MDCContextAware {
           (old_holsters ++ old_inventory).foreach {
             case (obj, guid) =>
               sendResponse(ObjectDeleteMessage(guid, 0))
-              taskResolver ! GUIDTask.UnregisterEquipment(obj)(continent.GUID)
+              continent.tasks ! GUIDTask.UnregisterEquipment(obj)(continent.GUID)
           }
           //redraw
           if (maxhand) {
-            taskResolver ! HoldNewEquipmentUp(player, taskResolver)(
+            continent.tasks ! HoldNewEquipmentUp(player)(
               Tool(GlobalDefinitions.MAXArms(subtype, player.Faction)),
               0
             )
@@ -2245,7 +2241,7 @@ class SessionActor extends Actor with MDCContextAware {
           if (Avatar.purchaseCooldowns.contains(item.obj.Definition)) {
             avatarActor ! AvatarActor.UpdatePurchaseTime(item.obj.Definition)
           }
-          taskResolver ! PutLoadoutEquipmentInInventory(target, taskResolver)(item.obj, item.start)
+          continent.tasks ! PutLoadoutEquipmentInInventory(target)(item.obj, item.start)
       }
     }
   }
@@ -2596,16 +2592,15 @@ class SessionActor extends Actor with MDCContextAware {
             sendResponse(ItemTransactionResultMessage(msg.terminal_guid, TransactionType.Buy, false))
           case None =>
             avatarActor ! AvatarActor.UpdatePurchaseTime(item.Definition)
-            taskResolver ! BuyNewEquipmentPutInInventory(
+            continent.tasks ! BuyNewEquipmentPutInInventory(
               continent.GUID(tplayer.VehicleSeated) match { case Some(v: Vehicle) => v; case _ => player },
-              taskResolver,
               tplayer,
               msg.terminal_guid
             )(item)
         }
 
       case Terminal.SellEquipment() =>
-        SellEquipmentFromInventory(tplayer, taskResolver, tplayer, msg.terminal_guid)(Player.FreeHandSlot)
+        SellEquipmentFromInventory(tplayer, tplayer, msg.terminal_guid)(Player.FreeHandSlot)
 
       case Terminal.LearnCertification(cert) =>
         avatarActor ! AvatarActor.LearnCertification(msg.terminal_guid, cert)
@@ -2663,7 +2658,7 @@ class SessionActor extends Actor with MDCContextAware {
                   entry.obj.Faction = tplayer.Faction
                   vTrunk.InsertQuickly(entry.start, entry.obj)
                 })
-                taskResolver ! RegisterVehicleFromSpawnPad(vehicle, pad)
+                continent.tasks ! RegisterVehicleFromSpawnPad(vehicle, pad)
                 sendResponse(ItemTransactionResultMessage(msg.terminal_guid, TransactionType.Buy, true))
             }
           case None =>
@@ -2932,7 +2927,7 @@ class SessionActor extends Actor with MDCContextAware {
               (old_weapons ++ old_inventory).foreach {
                 case (obj, guid) =>
                   sendResponse(ObjectDeleteMessage(guid, 0))
-                  taskResolver ! GUIDTask.UnregisterEquipment(obj)(continent.GUID)
+                  continent.tasks ! GUIDTask.UnregisterEquipment(obj)(continent.GUID)
               }
               ApplyPurchaseTimersBeforePackingLoadout(player, vehicle, added_weapons ++ new_inventory)
             } else if (accessedContainer.contains(target)) {
@@ -3520,7 +3515,7 @@ class SessionActor extends Actor with MDCContextAware {
         })
         //load active players in zone (excepting players who are seated or players who are us)
         val live = continent.LivePlayers
-        log.info(s"loading players ${live}")
+        log.info(s"loading players $live")
         live
           .filterNot(tplayer => {
             tplayer.GUID == player.GUID || tplayer.VehicleSeated.nonEmpty
@@ -3641,7 +3636,7 @@ class SessionActor extends Actor with MDCContextAware {
         allActiveVehicles.collect {
           case vehicle if vehicle.CargoHolds.nonEmpty =>
             vehicle.CargoHolds.collect({
-              case (index, hold) if hold.isOccupied => {
+              case (index, hold: Cargo) if hold.isOccupied => {
                 CargoBehavior.CargoMountBehaviorForAll(
                   vehicle,
                   hold.Occupant.get,
@@ -3676,7 +3671,7 @@ class SessionActor extends Actor with MDCContextAware {
 
         //implant terminals
         continent.map.terminalToInterface.foreach({
-          case ((terminal_guid, interface_guid)) =>
+          case (terminal_guid, interface_guid) =>
             val parent_guid = PlanetSideGUID(terminal_guid)
             continent.GUID(interface_guid) match {
               case Some(obj: Terminal) =>
@@ -3713,7 +3708,7 @@ class SessionActor extends Actor with MDCContextAware {
 
         //base turrets
         continent.map.turretToWeapon
-          .map { case ((turret_guid, _)) => continent.GUID(turret_guid) }
+          .map { case (turret_guid: Int, _) => continent.GUID(turret_guid) }
           .collect {
             case Some(turret: FacilityTurret) =>
               val pguid = turret.GUID
@@ -4208,7 +4203,7 @@ class SessionActor extends Actor with MDCContextAware {
                   CancelZoningProcessWithDescriptiveReason("cancel_use")
                   continent.GUID(player.VehicleSeated) match {
                     case Some(_) =>
-                      RemoveOldEquipmentFromInventory(player, taskResolver)(item)
+                      RemoveOldEquipmentFromInventory(player)(item)
                     case None =>
                       DropEquipmentFromInventory(player)(item)
                   }
@@ -4255,9 +4250,9 @@ class SessionActor extends Actor with MDCContextAware {
                 case x :: xs =>
                   val (deleteFunc, modifyFunc): (Equipment => Future[Any], (AmmoBox, Int) => Unit) = obj match {
                     case veh: Vehicle =>
-                      (RemoveOldEquipmentFromInventory(veh, taskResolver), ModifyAmmunitionInVehicle(veh))
+                      (RemoveOldEquipmentFromInventory(veh), ModifyAmmunitionInVehicle(veh))
                     case o: PlanetSideServerObject with Container =>
-                      (RemoveOldEquipmentFromInventory(o, taskResolver), ModifyAmmunition(o))
+                      (RemoveOldEquipmentFromInventory(o), ModifyAmmunition(o))
                     case _ =>
                       throw new Exception("ReloadMessage: should be a server object, not a regular game object")
                   }
@@ -4425,7 +4420,7 @@ class SessionActor extends Actor with MDCContextAware {
                   continent.id,
                   AvatarAction.ProjectileExplodes(player.GUID, obj.GUID, obj)
                 )
-                taskResolver ! UnregisterProjectile(obj)
+                continent.tasks ! UnregisterProjectile(obj)
               }
             }
 
@@ -4487,7 +4482,7 @@ class SessionActor extends Actor with MDCContextAware {
                 Some(destination: PlanetSideServerObject with Container),
                 Some(item: Equipment)
               ) =>
-            ContainableMoveItem(taskResolver, player.Name, source, destination, item, dest)
+            ContainableMoveItem(player.Name, source, destination, item, dest)
           case (None, _, _) =>
             log.error(s"MoveItem: wanted to move $item_guid from $source_guid, but could not find source object")
           case (_, None, _) =>
@@ -4524,7 +4519,7 @@ class SessionActor extends Actor with MDCContextAware {
               destination.Fit(item)
             ) match {
               case (Some((source, Some(_))), Some(dest)) =>
-                ContainableMoveItem(taskResolver, player.Name, source, destination, item, dest)
+                ContainableMoveItem(player.Name, source, destination, item, dest)
               case (None, _) =>
                 log.error(s"LootItem: can not find where $item is put currently")
               case (_, None) =>
@@ -4755,7 +4750,7 @@ class SessionActor extends Actor with MDCContextAware {
                           )
                         )
                         sendResponse(ObjectDeleteMessage(kit.GUID, 0))
-                        taskResolver ! GUIDTask.UnregisterEquipment(kit)(continent.GUID)
+                        continent.tasks ! GUIDTask.UnregisterEquipment(kit)(continent.GUID)
                       }
                   }
 
@@ -5108,7 +5103,7 @@ class SessionActor extends Actor with MDCContextAware {
               case _ =>
                 GUIDTask.RegisterObjectTask(dObj)(continent.GUID)
             }
-            taskResolver ! CallBackForTask(tasking, continent.Deployables, Zone.Deployable.Build(dObj, obj))
+            continent.tasks ! CallBackForTask(tasking, continent.Deployables, Zone.Deployable.Build(dObj, obj))
 
           case Some(obj) =>
             log.warn(s"DeployObject: $obj is something?")
@@ -6373,9 +6368,9 @@ class SessionActor extends Actor with MDCContextAware {
           case x :: xs =>
             val (deleteFunc, modifyFunc): (Equipment => Future[Any], (AmmoBox, Int) => Unit) = obj match {
               case (veh: Vehicle) =>
-                (RemoveOldEquipmentFromInventory(veh, taskResolver), ModifyAmmunitionInVehicle(veh))
+                (RemoveOldEquipmentFromInventory(veh), ModifyAmmunitionInVehicle(veh))
               case o: PlanetSideServerObject with Container =>
-                (RemoveOldEquipmentFromInventory(o, taskResolver), ModifyAmmunition(o))
+                (RemoveOldEquipmentFromInventory(o), ModifyAmmunition(o))
               case _ =>
                 throw new Exception(
                   "PerformToolAmmoChange: (remove/modify) should be a server object, not a regular game object"
@@ -6436,7 +6431,7 @@ class SessionActor extends Actor with MDCContextAware {
                                 s"ChangeAmmo: taking ${originalBoxCapacity - splitReloadAmmo} from a box of ${originalBoxCapacity} $requestedAmmoType"
                               )
                               val boxForInventory = AmmoBox(box.Definition, splitReloadAmmo)
-                              taskResolver ! stowNewFunc(boxForInventory)
+                              continent.tasks ! stowNewFunc(boxForInventory)
                               fullMagazine
                             })
             sendResponse(
@@ -6481,10 +6476,10 @@ class SessionActor extends Actor with MDCContextAware {
                 case Nil | List(_) => ; //done (the former case is technically not possible)
                 case _ :: xs =>
                   modifyFunc(previousBox, 0) //update to changed capacity value
-                  xs.foreach(box => { taskResolver ! stowNewFunc(box) })
+                  xs.foreach(box => { continent.tasks ! stowNewFunc(box) })
               }
             } else {
-              taskResolver ! GUIDTask.UnregisterObjectTask(previousBox)(continent.GUID)
+              continent.tasks ! GUIDTask.UnregisterObjectTask(previousBox)(continent.GUID)
             }
         }
       }
@@ -6544,29 +6539,29 @@ class SessionActor extends Actor with MDCContextAware {
       FindEquipmentStock(player, FindToolThatUses(ammoType), 3, CountGrenades).reverse match { //do not search sidearm holsters
         case Nil =>
           log.info(s"no more $ammoType grenades")
-          RemoveOldEquipmentFromInventory(player, taskResolver)(tool)
+          RemoveOldEquipmentFromInventory(player)(tool)
 
         case x :: xs => //this is similar to ReloadMessage
           val box = x.obj.asInstanceOf[Tool]
           val tailReloadValue: Int = if (xs.isEmpty) { 0 }
           else { xs.map(_.obj.asInstanceOf[Tool].Magazine).reduce(_ + _) }
           val sumReloadValue: Int = box.Magazine + tailReloadValue
-          val actualReloadValue = (if (sumReloadValue <= 3) {
-                                     RemoveOldEquipmentFromInventory(player, taskResolver)(x.obj)
-                                     sumReloadValue
-                                   } else {
-                                     ModifyAmmunition(player)(box.AmmoSlot.Box, 3 - tailReloadValue)
-                                     3
-                                   })
+          val actualReloadValue = if (sumReloadValue <= 3) {
+            RemoveOldEquipmentFromInventory(player)(x.obj)
+            sumReloadValue
+          } else {
+            ModifyAmmunition(player)(box.AmmoSlot.Box, 3 - tailReloadValue)
+            3
+          }
           log.info(s"found $actualReloadValue more $ammoType grenades to throw")
           ModifyAmmunition(player)(
             tool.AmmoSlot.Box,
             -actualReloadValue
           ) //grenade item already in holster (negative because empty)
-          xs.foreach(item => { RemoveOldEquipmentFromInventory(player, taskResolver)(item.obj) })
+          xs.foreach(item => { RemoveOldEquipmentFromInventory(player)(item.obj) })
       }
     } else if (tdef == GlobalDefinitions.phoenix) {
-      RemoveOldEquipmentFromInventory(player, taskResolver)(tool)
+      RemoveOldEquipmentFromInventory(player)(tool)
     }
   }
 
@@ -7010,7 +7005,7 @@ class SessionActor extends Actor with MDCContextAware {
           val zone            = vehicle.PreviousGatingManifest().get.origin
           zone.VehicleEvents ! VehicleServiceMessage(
             zone.id,
-            VehicleAction.UnloadVehicle(player.GUID, zone, vehicle, vehicleToDelete)
+            VehicleAction.UnloadVehicle(player.GUID, vehicle, vehicleToDelete)
           )
           log.info(
             s"AvatarCreate: cleaning up ghost of transitioning vehicle ${vehicle.Definition.Name}@${vehicleToDelete.guid} in zone ${zone.id}"
@@ -7257,12 +7252,12 @@ class SessionActor extends Actor with MDCContextAware {
       obj.Slot(4).Equipment match {
         case None => ;
         case Some(knife) =>
-          RemoveOldEquipmentFromInventory(obj, taskResolver)(knife)
+          RemoveOldEquipmentFromInventory(obj)(knife)
       }
       obj.Slot(0).Equipment match {
         case Some(arms: Tool) =>
           if (GlobalDefinitions.isMaxArms(arms.Definition)) {
-            RemoveOldEquipmentFromInventory(obj, taskResolver)(arms)
+            RemoveOldEquipmentFromInventory(obj)(arms)
           }
         case _ => ;
       }
@@ -7307,7 +7302,7 @@ class SessionActor extends Actor with MDCContextAware {
       zone.Population ! Zone.Population.Release(avatar)
       sendResponse(ObjectDeleteMessage(pguid, 0))
       zone.AvatarEvents ! AvatarServiceMessage(zone.id, AvatarAction.ObjectDelete(pguid, pguid, 0))
-      taskResolver ! GUIDTask.UnregisterPlayer(tplayer)(zone.GUID)
+      zone.tasks ! GUIDTask.UnregisterPlayer(tplayer)(zone.GUID)
     }
   }
 
@@ -8174,7 +8169,7 @@ class SessionActor extends Actor with MDCContextAware {
     */
   def CommonDestroyConstructionItem(tool: ConstructionItem, index: Int): Unit = {
     if (SafelyRemoveConstructionItemFromSlot(tool, index, "CommonDestroyConstructionItem")) {
-      taskResolver ! GUIDTask.UnregisterEquipment(tool)(continent.GUID)
+      continent.tasks ! GUIDTask.UnregisterEquipment(tool)(continent.GUID)
     }
   }
 
@@ -8316,7 +8311,7 @@ class SessionActor extends Actor with MDCContextAware {
       }) match {
       case Some((parent, Some(slot))) =>
         obj.Position = Vector3.Zero
-        RemoveOldEquipmentFromInventory(parent, taskResolver)(obj)
+        RemoveOldEquipmentFromInventory(parent)(obj)
         log.info(s"RequestDestroy: equipment $obj")
         true
 
@@ -8515,7 +8510,7 @@ class SessionActor extends Actor with MDCContextAware {
     if (!zoneReload && zoneId == continent.id) {
       if (player.isBackpack) { // important! test the actor-wide player ref, not the parameter
         // respawning from unregistered player
-        taskResolver ! RegisterAvatar(targetPlayer)
+        continent.tasks ! RegisterAvatar(targetPlayer)
       } else {
         // move existing player; this is the one case where the original GUID is retained by the player
         self ! PlayerLoaded(targetPlayer)
@@ -8618,7 +8613,7 @@ class SessionActor extends Actor with MDCContextAware {
     if (!zoneReload && zoneId == continent.id) {
       if (vehicle.Definition == GlobalDefinitions.droppod) {
         //instant action droppod in the same zone
-        taskResolver ! RegisterDroppod(vehicle, player)
+        continent.tasks ! RegisterDroppod(vehicle, player)
       } else {
         //transferring a vehicle between spawn points (warp gates) in the same zone
         self ! PlayerLoaded(player)
@@ -8642,7 +8637,7 @@ class SessionActor extends Actor with MDCContextAware {
           //do not delete if vehicle has passengers or cargo
           continent.VehicleEvents ! VehicleServiceMessage(
             continent.id,
-            VehicleAction.UnloadVehicle(pguid, continent, vehicle, topLevel)
+            VehicleAction.UnloadVehicle(pguid, vehicle, topLevel)
           )
           None
         } else {
@@ -8741,7 +8736,7 @@ class SessionActor extends Actor with MDCContextAware {
       task: TaskResolver.GiveTask,
       zoneMessage: InterstellarClusterService.FindZone
   ): Unit = {
-    taskResolver ! TaskResolver.GiveTask(
+    continent.tasks ! TaskResolver.GiveTask(
       new Task() {
         override def isComplete: Task.Resolution.Value = task.task.isComplete
 
@@ -8772,7 +8767,7 @@ class SessionActor extends Actor with MDCContextAware {
       avatarActor ! AvatarActor.SetVehicle(None)
     }
     RemoveBoomerTriggersFromInventory().foreach(obj => {
-      taskResolver ! GUIDTask.UnregisterObjectTask(obj)(continent.GUID)
+      continent.tasks ! GUIDTask.UnregisterObjectTask(obj)(continent.GUID)
     })
     Deployables.Disown(continent, avatar, self)
     drawDeloyableIcon = RedrawDeployableIcons //important for when SetCurrentAvatar initializes the UI next zone
@@ -9254,7 +9249,7 @@ class SessionActor extends Actor with MDCContextAware {
       continent.id,
       AvatarAction.ProjectileExplodes(player.GUID, projectile_guid, projectile)
     )
-    taskResolver ! UnregisterProjectile(projectile)
+    continent.tasks ! UnregisterProjectile(projectile)
     projectiles(local_index) match {
       case Some(obj) if !obj.isResolved => obj.Miss()
       case _                            => ;
@@ -9290,7 +9285,7 @@ class SessionActor extends Actor with MDCContextAware {
         tplayer.VehicleSeated = None
         zone.Population ! Zone.Population.Release(avatar)
         sendResponse(ObjectDeleteMessage(tplayer.GUID, 0))
-        taskResolver ! GUIDTask.UnregisterPlayer(tplayer)(zone.GUID)
+        zone.tasks ! GUIDTask.UnregisterPlayer(tplayer)(zone.GUID)
     }
   }
 
@@ -9480,19 +9475,19 @@ class SessionActor extends Actor with MDCContextAware {
             log.trace(
               s"WeaponFireMessage: ${projectile_info.Name} is a remote projectile"
             )
-            taskResolver ! (if (projectile.HasGUID) {
-                              continent.AvatarEvents ! AvatarServiceMessage(
-                                continent.id,
-                                AvatarAction.ProjectileExplodes(
-                                  player.GUID,
-                                  projectile.GUID,
-                                  projectile
-                                )
-                              )
-                              ReregisterProjectile(projectile)
-                            } else {
-                              RegisterProjectile(projectile)
-                            })
+            continent.tasks ! (if (projectile.HasGUID) {
+                                 continent.AvatarEvents ! AvatarServiceMessage(
+                                   continent.id,
+                                   AvatarAction.ProjectileExplodes(
+                                     player.GUID,
+                                     projectile.GUID,
+                                     projectile
+                                   )
+                                 )
+                                 ReregisterProjectile(projectile)
+                               } else {
+                                 RegisterProjectile(projectile)
+                               })
           }
           projectilesToCleanUp(projectileIndex) = false
 
